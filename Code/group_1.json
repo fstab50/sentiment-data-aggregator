@@ -1,0 +1,4 @@
+{
+    'Group': 1,
+    'Regions': ['ap-northeast-1', 'ap-northeast-2', 'ap_northeast-3', 'sa-east-1']
+}
