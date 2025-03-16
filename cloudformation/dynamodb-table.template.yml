@@ -1,0 +1,473 @@
+#-------------------------------------------------------------------------------
+#   DynamoDB -- Create Database
+#
+#      Version  1.0
+#      Author:  Blake Huber
+#      Instructions:
+#           - cloudformation template must be in stalled in HomeRegion
+#             first to create IAM policies and the lambda execution role.
+#           - Installation in other regions skips creation of IAM resources.
+#           - Environment parameter controls the Amazon s3 bucket from which code
+#             is extracted for deployment.
+#      Limitations:
+#           - template only compatible in default HomeRegion (ie, any region where
+#             dynamodb source database exists)
+#           - template contains stub for 'qa' environment, qa database N/A
+#
+#-------------------------------------------------------------------------------
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'EC2 SpotPrice NoSQL Database'
+
+#-------------------------------------------------------------------------------
+#   PARAMETERS
+#-------------------------------------------------------------------------------
+Parameters:
+  Environment:
+    AllowedValues:
+        - 'dev'
+        - 'qa'
+        - 'pr'
+    Default: 'dev'
+    Description: 'Specify environment from which to deploy code: dev (development),
+                  qa (quality assurance), or pr (production) [DEPRECATED]'
+    Type: String
+  HomeRegion:
+    AllowedValues:
+        - 'ap-south-1'
+        - 'ap-southeast-1'
+        - 'ap-southeast-2'
+        - 'ap-northeast-1'
+        - 'ap-northeast-2'
+        - 'ca-central-1'
+        - 'eu-central-1'
+        - 'eu-west-1'
+        - 'eu-west-2'
+        - 'sa-east-1'
+        - 'us-east-1'
+        - 'us-east-2'
+        - 'us-west-1'
+        - 'us-west-2'
+    Default: 'us-east-2'
+    Description: Specify the main ("home" region) in which IAM resources will be deployed first
+    Type: String
+  DynamoDBTableName:
+    Description: "Name of DynamoDB Table"
+    Type: String
+    Default: 'SpotPriceDataStore'
+    MinLength: 1
+    MaxLength: 60
+  DynamodDBIndexName:
+    Type: String
+    Default: 'InstanceTypesIndex'
+    Description: "Name of Global Secondary Index"
+  TableReadCapacityUnits:
+    Description: "Provisioned RCU for Table"
+    Type: Number
+    MinValue: 25
+    Default: 25
+    ConstraintDescription: "Enter a number >=4"
+  TableWriteCapacityUnits:
+    Description: "Provisioned WCU for Table"
+    Type: Number
+    MinValue: 25
+    Default: 25
+    ConstraintDescription: "Enter a number >=4"
+  TableReadScalingMaximum:
+    Description: "Max Provisioned RCU for main table"
+    Type: Number
+    MinValue: 25
+    Default: 100
+    ConstraintDescription: "Enter a number <=200"
+  TableReadScalingMinimum:
+    Description: "Minimum Provisioned WCU for main table"
+    Type: Number
+    MinValue: 25
+    Default: 25
+    ConstraintDescription: "Enter a number <=200"
+  TableWriteScalingMaximum:
+    Description: "Max Provisioned WCU for main table"
+    Type: Number
+    MinValue: 25
+    Default: 135
+    ConstraintDescription: "Enter a number <=200"
+  TableWriteScalingMinimum:
+    Description: "Minimum Provisioned WCU for main table"
+    Type: Number
+    MinValue: 25
+    Default: 25
+    ConstraintDescription: "Enter a number <=200"
+  GSIWriteCapacityUnits:
+    Description: "Provisioned WCU for GSI"
+    Type: Number
+    MinValue: 25
+    Default: 25
+    ConstraintDescription: "Enter a number >=25"
+  GSIReadCapacityUnits:
+    Description: "Provisioned RCU for GSI"
+    Type: Number
+    MinValue: 25
+    Default: 25
+    ConstraintDescription: "Enter a number >=25"
+  GSIReadScalingMaximum:
+    Description: "Global Secondary Index Autoscaling RCU"
+    Type: Number
+    MinValue: 25
+    Default: 100
+    ConstraintDescription: "Enter a number >=25"
+  GSIReadScalingMinimum:
+    Description: "Global Secondary Index Autoscaling WCU"
+    Type: Number
+    MinValue: 25
+    Default: 25
+    ConstraintDescription: "Enter a number >=25"
+  GSIWriteScalingMaximum:
+    Description: "Global Secondary Index Autoscaling RCU"
+    Type: Number
+    MinValue: 25
+    Default: 135
+    ConstraintDescription: "Enter a number >=25"
+  GSIWriteScalingMinimum:
+    Description: "Global Secondary Index Autoscaling WCU"
+    Type: Number
+    MinValue: 25
+    Default: 25
+    ConstraintDescription: "Enter a number >=25"
+
+
+#-------------------------------------------------------------------------------
+#   METADATA
+#-------------------------------------------------------------------------------
+Metadata:
+  License: MIT
+  Instructions: Set HomeRegion to your default AWS Region.  Deploy to create single DynamoDB Table.
+  Version: 0.1
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+    - Label:
+            default: Prerequisites
+      Parameters:
+            - HomeRegion
+    - Label:
+            default: Environment
+      Parameters:
+            - Environment
+    - Label:
+        default: DynamoDB
+      Parameters:
+            - DynamoTableName
+            - DynamodDBIndexName
+            - TableReadCapacityUnits
+            - TableWriteCapacityUnits
+            - TableReadScalingMaximum
+            - TableReadScalingMinimum
+            - TableWriteScalingMaximum
+            - TableWriteScalingMinimum
+            - GSIReadCapacityUnits
+            - GSIWriteCapacityUnits
+
+    ParameterLabels:
+        HomeRegion:
+            default: Main Resource Region
+        Environment:
+            default: Code Origin
+        DynamoDBTableName:
+            default: DynamoDB Database Table Name
+        DynamodDBIndexName:
+            default: DynamoDB Global Secondary Index Name
+        TableReadCapacityUnits:
+            default: Table RCU
+        TableWriteCapacityUnits:
+            default: Table WCU
+        TableReadScalingMaximum:
+            default: Maximum RCU
+        TableReadScalingMinimum:
+            default: Minimum RCU
+        TableWriteScalingMaximum:
+            default: Maximum WCU
+        TableWriteScalingMinimum:
+            default: Minimum WCU
+        GSIReadCapacityUnits:
+            default: GSI RCU
+        GSIWriteCapacityUnits:
+            default: GSI WCU
+
+
+#-------------------------------------------------------------------------------
+#   CONDITIONS
+#-------------------------------------------------------------------------------
+Conditions:
+  CreateIAM:
+      Fn::Equals:
+          - !Ref "AWS::Region"
+          - !Ref HomeRegion
+
+
+#-------------------------------------------------------------------------------
+#   MAPPINGS
+#-------------------------------------------------------------------------------
+Mappings:
+    EnvironmentMap:
+        '102512488663':
+            "Env": "dev"
+        '935229214006':
+            "Env": "qa"
+        '872277419998':
+            "Env": "pr"
+
+
+#-------------------------------------------------------------------------------
+#   RESOURCES
+#-------------------------------------------------------------------------------
+Resources:
+  DDBTable:
+    Type: "AWS::DynamoDB::Table"
+    Properties:
+      TableName: !Ref DynamoDBTableName
+      AttributeDefinitions:
+        -
+          AttributeName: "Timestamp"
+          AttributeType: "S"
+        -
+          AttributeName: "SpotPrice"
+          AttributeType: "S"
+        -
+          AttributeName: "InstanceType"
+          AttributeType: "S"
+        -
+          AttributeName: "OnDemandPrice"
+          AttributeType: "S"
+
+      KeySchema:
+        -
+          AttributeName: "Timestamp"
+          KeyType: "HASH"
+        -
+          AttributeName: "SpotPrice"
+          KeyType: "RANGE"
+
+      ProvisionedThroughput:
+        ReadCapacityUnits: !Ref TableReadCapacityUnits
+        WriteCapacityUnits: !Ref TableWriteCapacityUnits
+
+      LocalSecondaryIndexes:
+        -
+          IndexName: "SpotPriceIndex"
+          KeySchema:
+            -
+              AttributeName: "Timestamp"
+              KeyType: "HASH"
+            -
+              AttributeName: "InstanceType"
+              KeyType: "RANGE"
+          Projection:
+            NonKeyAttributes:
+                - RegionName
+                - SpotPrice
+                - AvailabilityZone
+                - ProductDescription
+                - OnDemandPrice
+                - Unit
+                - RecordDate
+            ProjectionType: INCLUDE
+        -
+          IndexName: "OnDemandPriceIndex"
+          KeySchema:
+            -
+              AttributeName: "Timestamp"
+              KeyType: "HASH"
+            -
+              AttributeName: "OnDemandPrice"
+              KeyType: "RANGE"
+          Projection:
+            NonKeyAttributes:
+                - RegionName
+                - SpotPrice
+                - AvailabilityZone
+                - ProductDescription
+                - InstanceType
+                - Unit
+                - RecordDate
+            ProjectionType: INCLUDE
+
+      GlobalSecondaryIndexes:
+        -
+          IndexName:
+            Ref:  DynamodDBIndexName
+          KeySchema:
+            -
+              AttributeName: "InstanceType"
+              KeyType: "HASH"
+            -
+              AttributeName: "SpotPrice"
+              KeyType: "RANGE"
+          Projection:
+            ProjectionType: ALL
+          ProvisionedThroughput:
+            ReadCapacityUnits: !Ref GSIReadCapacityUnits
+            WriteCapacityUnits: !Ref GSIWriteCapacityUnits
+
+  # --- Table READ Autoscaling Config --------------------------------------------------------------
+  TableReadCapacityScalableTarget:
+    Type: "AWS::ApplicationAutoScaling::ScalableTarget"
+    Properties:
+        MaxCapacity: !Ref TableReadScalingMaximum
+        MinCapacity: !Ref TableReadScalingMinimum
+        ResourceId: !Join
+            - /
+            - - table
+              - !Ref DDBTable
+        RoleARN: !GetAtt ScalingRole.Arn
+        ScalableDimension: dynamodb:table:ReadCapacityUnits
+        ServiceNamespace: dynamodb
+    DependsOn: DDBTable
+
+  TableReadScalingPolicy:
+    Type: "AWS::ApplicationAutoScaling::ScalingPolicy"
+    Properties:
+        PolicyName: ReadAutoScalingPolicy
+        PolicyType: TargetTrackingScaling
+        ScalingTargetId: !Ref TableReadCapacityScalableTarget
+        TargetTrackingScalingPolicyConfiguration:
+            TargetValue: 80.0
+            ScaleInCooldown: 6
+            ScaleOutCooldown: 6
+            PredefinedMetricSpecification:
+                PredefinedMetricType: DynamoDBReadCapacityUtilization
+
+  # --- Table WRITE Autoscaling Config -------------------------------------------------------------
+  TableWriteCapacityScalableTarget:
+    Type: "AWS::ApplicationAutoScaling::ScalableTarget"
+    Properties:
+        MaxCapacity: !Ref TableWriteScalingMaximum
+        MinCapacity: !Ref TableWriteScalingMinimum
+        ResourceId: !Join
+            - /
+            - - table
+              - !Ref DDBTable
+        RoleARN: !GetAtt ScalingRole.Arn
+        ScalableDimension: dynamodb:table:WriteCapacityUnits
+        ServiceNamespace: dynamodb
+    DependsOn: DDBTable
+
+  TableWriteScalingPolicy:
+    Type: "AWS::ApplicationAutoScaling::ScalingPolicy"
+    Properties:
+        PolicyName: WriteAutoScalingPolicy
+        PolicyType: TargetTrackingScaling
+        ScalingTargetId: !Ref TableWriteCapacityScalableTarget
+        TargetTrackingScalingPolicyConfiguration:
+            TargetValue: 90.0
+            ScaleInCooldown: 6
+            ScaleOutCooldown: 6
+            PredefinedMetricSpecification:
+                PredefinedMetricType: DynamoDBWriteCapacityUtilization
+
+  # GSI Index Scaling target, policy (READ) -------------------------------------------------------------
+  GSIReadCapacityScalableTarget:
+    Type: "AWS::ApplicationAutoScaling::ScalableTarget"
+    Properties:
+        MaxCapacity: !Ref GSIReadScalingMaximum
+        MinCapacity: !Ref GSIReadScalingMinimum
+        ResourceId: !Sub table/${DynamoDBTableName}/index/${DynamodDBIndexName}
+        RoleARN: !GetAtt ScalingRole.Arn
+        ScalableDimension: "dynamodb:index:ReadCapacityUnits"
+        ServiceNamespace: dynamodb
+    DependsOn: DDBTable
+
+  GSIReadScalingPolicy:
+    Type: "AWS::ApplicationAutoScaling::ScalingPolicy"
+    Properties:
+        PolicyName: ReadAutoScalingPolicy
+        PolicyType: TargetTrackingScaling
+        ScalingTargetId:
+            Ref: GSIReadCapacityScalableTarget
+        TargetTrackingScalingPolicyConfiguration:
+            TargetValue: 80
+            ScaleInCooldown: 60
+            ScaleOutCooldown: 60
+            PredefinedMetricSpecification:
+                PredefinedMetricType: DynamoDBReadCapacityUtilization
+
+  # GSI Index Scaling target, policy (WRITE) ------------------------------------------------------------
+  GSIWriteCapacityScalableTarget:
+    Type: "AWS::ApplicationAutoScaling::ScalableTarget"
+    Properties:
+        MaxCapacity: !Ref GSIWriteScalingMaximum
+        MinCapacity: !Ref GSIWriteScalingMinimum
+        ResourceId: !Sub table/${DynamoDBTableName}/index/${DynamodDBIndexName}
+        RoleARN: !GetAtt ScalingRole.Arn
+        ScalableDimension: "dynamodb:index:WriteCapacityUnits"
+        ServiceNamespace: dynamodb
+    DependsOn:  DDBTable
+
+  GSIWriteScalingPolicy:
+    Type: "AWS::ApplicationAutoScaling::ScalingPolicy"
+    Properties:
+        PolicyName: WriteAutoScalingPolicy
+        PolicyType: TargetTrackingScaling
+        ScalingTargetId:
+            Ref: GSIWriteCapacityScalableTarget
+        TargetTrackingScalingPolicyConfiguration:
+            TargetValue: 90
+            ScaleInCooldown: 60
+            ScaleOutCooldown: 60
+            PredefinedMetricSpecification:
+                PredefinedMetricType: DynamoDBWriteCapacityUtilization
+
+  ScalingRole:
+    Type: "AWS::IAM::Role"
+    Condition: CreateIAM
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              Service:
+                - application-autoscaling.amazonaws.com
+            Action:
+              - "sts:AssumeRole"
+      Path: "/"
+      Policies:
+        -
+          PolicyName: "root"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Action:
+                  - "dynamodb:DescribeTable"
+                  - "dynamodb:UpdateTable"
+                  - "cloudwatch:PutMetricAlarm"
+                  - "cloudwatch:DescribeAlarms"
+                  - "cloudwatch:GetMetricStatistics"
+                  - "cloudwatch:SetAlarmState"
+                  - "cloudwatch:DeleteAlarms"
+                Resource: "*"
+
+
+#-------------------------------------------------------------------------------
+#   OUTPUTS
+#-------------------------------------------------------------------------------
+Outputs:
+  AccountIdentifier:
+    Description: AWS Account Number derived from AccountId pseudo-parameter
+    Value: !Ref "AWS::AccountId"
+  CodeEnvironment:
+    Description: Code environment deployed
+    Value: !Ref Environment
+  TableProvisionedRCU:
+    Description: Table Provisioned Read Capacity Units
+    Value: !Ref TableReadCapacityUnits
+  TableProvisionedWCU:
+    Description: Table Provisioned Write Capacity Units
+    Value: !Ref TableWriteCapacityUnits
+  TableWriteScalingMaximum:
+    Description: Table Min Starting Write Capacity Units
+    Value: !Ref TableWriteScalingMinimum
+  TableWriteScalingMaximum:
+    Description: Table Max Scale up Write Capacity Units
+    Value: !Ref TableWriteScalingMaximum

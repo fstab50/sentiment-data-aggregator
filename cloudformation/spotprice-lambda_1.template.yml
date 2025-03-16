@@ -1,0 +1,471 @@
+#-------------------------------------------------------------------------------
+#   AWS LAMBDA -- SpotPrice Retriever - Group 1
+#
+#      Version  0.5
+#      Author:  Blake Huber
+#      Reference Template:  Lambda, indiv accounts
+#      Instructions:
+#           - cloudformation template must be installed in HomeRegion
+#             first to create IAM policies and the lambda execution role.
+#           - Installation in other regions skips creation of IAM resources.
+#           - Environment parameter controls the Amazon s3 bucket from which code
+#             is extracted for deployment.
+#      Limitations:
+#           - dynamodb integration valid only in default HomeRegion (ie, any
+#             region where dynamodb source database exists)
+#
+#-------------------------------------------------------------------------------
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: '__MPCBUILDVERSION__ - MPC EC2 Price API Retrieval Lambda'
+
+#-------------------------------------------------------------------------------
+#   PARAMETERS
+#-------------------------------------------------------------------------------
+Parameters:
+  ArchiveS3Bucket:
+    Default: 'spotprices-daily'
+    Description: Name of S3 Bucket storing spot price data archives after processing
+    Type: String
+    MinLength: 10
+    MaxLength: 50
+  CloudTrailEnabled:
+    AllowedValues:
+        - 'Yes'
+        - 'No'
+    Default: 'Yes'
+    Description: Specify if CloudTrail is enabled in the current region (REQUIRED)
+    Type: String
+  Environment:
+    AllowedValues:
+        - 'dev'
+        - 'qa'
+        - 'pr'
+    Default: 'dev'
+    Description: 'Specify environment from which to deploy code: dev (development),
+                  qa (quality assurance), or pr (production)'
+    Type: String
+  HomeRegion:
+    AllowedValues:
+        - 'ap-south-1'
+        - 'ap-southeast-1'
+        - 'ap-southeast-2'
+        - 'ap-northeast-1'
+        - 'ap-northeast-2'
+        - 'ca-central-1'
+        - 'eu-central-1'
+        - 'eu-west-1'
+        - 'eu-west-2'
+        - 'sa-east-1'
+        - 'us-east-1'
+        - 'us-east-2'
+        - 'us-west-1'
+        - 'us-west-2'
+    Default: 'us-east-2'
+    Description: Specify the main ("home" region) in which IAM resources will be deployed first
+    Type: String
+  DynamoDBRegion:
+    AllowedValues:
+        - 'ap-south-1'
+        - 'ap-southeast-1'
+        - 'ap-southeast-2'
+        - 'ap-northeast-1'
+        - 'ap-northeast-2'
+        - 'ca-central-1'
+        - 'eu-central-1'
+        - 'eu-west-1'
+        - 'eu-west-2'
+        - 'sa-east-1'
+        - 'us-east-1'
+        - 'us-east-2'
+        - 'us-west-1'
+        - 'us-west-2'
+    Default: 'us-east-2'
+    Description: 'Specify the region where DyanamoDB database resource resides with
+                  which this function will communicate'
+    Type: String
+  DynamoDBTable:
+    Default: 'SpotPriceDataStore'
+    Description: Name of the DyanamoDB database table this function will access
+    Type: String
+    MinLength: 1
+    MaxLength: 50
+    AllowedPattern: ^[a-zA-Z0-9_]*$
+  DynamoDBPartitionKey:
+    Default: 'Timestamp'
+    Description: Partition key of table denoted by DynamoDBTable parameter
+    Type: String
+    MinLength: 1
+    MaxLength: 50
+    AllowedPattern: ^[a-zA-Z0-9 ]*$
+  DynamoDBRangeKey:
+    Default: 'SpotPrice'
+    Description: Partition key of table denoted by DynamoDBTable parameter
+    Type: String
+    MinLength: 1
+    MaxLength: 50
+    AllowedPattern: ^[a-zA-Z0-9 ]*$
+  EnableNotification:
+    AllowedValues: [true, false]
+    Default: true
+    Description: 'Enable SNS Notifications'
+    Type: String
+  NotificationTopicArn:
+    Description: 'SNS topic for runtime status notification delivery'
+    Type: String
+    Default: 'arn:aws:sns:us-east-1:716415911659:admin-SMS-USeast-1'
+    AllowedValues:
+        - 'arn:aws:sns:us-east-1:716415911659:admin-SMS-USeast-1'
+        - 'arn:aws:sns:us-east-2:716415911659:SNSOpsTopic'
+        - 'arn:aws:sns:us-east-2:716415911659:SNSDevTopic'
+  DebugMode:
+    AllowedValues: [true, false]
+    Default: false
+    Description: 'true turns DBUGMODE on, false analyses test accounts'
+    Type: String
+
+
+#-------------------------------------------------------------------------------
+#   METADATA
+#-------------------------------------------------------------------------------
+Metadata:
+  AWS::CloudFormation::Interface:
+    # --- groups --------------------------------------
+    ParameterGroups:
+    - Label:
+        default: General Settings
+      Parameters:
+          - HomeRegion
+          - CloudTrailEnabled
+    - Label:
+        default: S3 Daily Archive Storage
+      Parameters:
+          - ArchiveS3Bucket
+    - Label:
+        default: AWS Lambda Settings
+      Parameters:
+          - Environment
+          - NotificationTopicArn
+          - ProfileLevel
+          - GeneratePDF
+          - PDFBinary
+          - PDFChecksumFile
+          - DebugMode
+    - Label:
+        default: DynamoDB Integration Settings
+      Parameters:
+          - DynamoDBRegion
+          - DynamoDBTable
+          - DynamoDBPartitionKey
+          - DynamoDBRangeKey
+
+    # --- labels --------------------------------------
+    ParameterLabels:
+      HomeRegion:
+          default: Main Resource Region
+      ArchiveS3Bucket:
+          default: Output Bucket
+      CloudTrailEnabled:
+          default: CloudTrail enabled (Y/N)
+      Environment:
+          default: Code Origin
+      NotificationTopicArn:
+          default: SNS Report Delivery Topic
+      DebugMode:
+          default: Debug Flag (Boolean)
+      DynamoDBRegion:
+          default: DynamoDB Location (region code)
+      DynamoDBTable:
+          default: Database Table
+      DynamoDBPartitionKey:
+          default: Table Hash Key
+      DynamoDBRangeKey:
+          default: Table Sort (Range) Key
+
+
+#-------------------------------------------------------------------------------
+#   CONDITIONS
+#-------------------------------------------------------------------------------
+Conditions:
+  CreateIAM:
+      Fn::Equals:
+          - !Ref "AWS::Region"
+          - !Ref HomeRegion
+  CreateResources:
+    Fn::Equals:
+        - Ref: CloudTrailEnabled
+        - 'Yes'
+
+
+#-------------------------------------------------------------------------------
+#   MAPPINGS
+#-------------------------------------------------------------------------------
+Mappings:
+    EnvironmentMap:
+        '716415911659':
+            "Env": "dev"
+        '935229214006':
+            "Env": "qa"
+        '872277419998':
+            "Env": "pr"
+
+
+#-------------------------------------------------------------------------------
+#   RESOURCES
+#-------------------------------------------------------------------------------
+Resources:
+  FunctionSpotPriceDataRetrieval:
+    Type: AWS::Lambda::Function
+    Condition: CreateResources
+    Properties:
+      Code:
+        S3Bucket: !Sub
+          - s3-${RegionCode}-install-${env}
+          - { RegionCode: !Ref "AWS::Region", env: !Ref Environment}
+        S3Key: Code/spotprice-lambda/spotprices-codebase.zip
+      Description: Lambda Function for database loading of EC2 Metadata
+      FunctionName: SpotPrice-Retriever
+      Handler: cli.lambda_handler
+      Role: !If [CreateIAM, !GetAtt "EC2SpotPriceRole.Arn", !Join [":", ["arn:aws:iam:", !Ref "AWS::AccountId", "role/SR-EC2SpotPrice"]]]
+      Environment:
+        Variables:
+            DEFAULT_REGION: !Ref "AWS::Region"
+            SNS_TOPIC_ARN: !Ref NotificationTopicArn
+            S3_BUCKET: !Ref ArchiveS3Bucket
+            DYNAMODB_REGION: !Ref DynamoDBRegion
+            DYNAMODB_TABLE: !Ref DynamoDBTable
+            DYNAMODB_HASH_KEY: !Ref DynamoDBPartitionKey
+            DYNAMODB_RANGE_KEY: !Ref DynamoDBRangeKey
+            DBUGMODE: !Ref DebugMode
+      Runtime: python3.7
+      Timeout: '900'
+      MemorySize: 1024
+
+  EC2SpotPriceRole:
+    Type: AWS::IAM::Role
+    Condition: CreateIAM
+    Properties:
+      RoleName: SR-EC2SpotPrice
+      AssumeRolePolicyDocument:
+        Statement:
+        - Action:
+          - sts:AssumeRole
+          Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+        Version: '2012-10-17'
+      Path: "/"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEC2ReadOnlyAccess
+        - arn:aws:iam::aws:policy/AWSCloudTrailReadOnlyAccess
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        -
+          PolicyName: NewRegionEnable
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: Allow
+                Action:
+                  - account:EnableRegion
+                Resource: "*"
+        -
+          PolicyName: STSCheck
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: Allow
+                Action:
+                  - sts:GetCallerIdentity
+                Resource: "*"
+        -
+          PolicyName: EC2ReadOnly
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: Allow
+                Action:
+                  - ec2:Describe*
+                Resource: "*"
+        -
+          PolicyName: S3Jobs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: Allow
+                Action:
+                  - s3:CreateJob
+                Resource: "*"
+        -
+          PolicyName: S3ReadOnly
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: Allow
+                Action:
+                  - s3:ListAllMyBuckets
+                  - s3:HeadBucket
+                Resource: "*"
+        -
+          PolicyName:  S3ReadWrite
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: Allow
+                Action:
+                    - s3:ListBucket
+                    - s3:ListMultipartUploadParts
+                    - s3:GetBucketAcl
+                    - s3:GetBucketPolicy
+                    - s3:GetObject
+                    - s3:GetBucketLocation
+                    - s3:PutObjectAcl
+                    - s3:PutObject
+                    - s3:DeleteObject
+                Resource:
+                    - !Join ['', ["arn:aws:s3:::", !Ref ArchiveS3Bucket]]
+                    - !Join ['', ["arn:aws:s3:::", !Ref ArchiveS3Bucket, "/*"]]
+        -
+          PolicyName:  DynamoDBExecution
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: Allow
+                Action:
+                    - dynamodb:BatchGetItem
+                    - dynamodb:BatchWriteItem
+                    - dynamodb:ConditionCheckItem
+                    - dynamodb:PutItem
+                    - dynamodb:UntagResource
+                    - cloudwatch:GetInsightRuleReport
+                    - dynamodb:DeleteItem
+                    - dynamodb:ListTagsOfResource
+                    - dynamodb:Scan
+                    - dynamodb:DescribeStream
+                    - dynamodb:Query
+                    - dynamodb:UpdateItem
+                    - dynamodb:DescribeTimeToLive
+                    - dynamodb:TagResource
+                    - dynamodb:DescribeTable
+                    - dynamodb:GetShardIterator
+                    - dynamodb:GetItem
+                    - dynamodb:DescribeContinuousBackups
+                    - dynamodb:UpdateTable
+                    - dynamodb:DescribeTableReplicaAutoScaling
+                    - dynamodb:GetRecords
+                Resource:
+                    - !Join ['', ["arn:aws:dynamodb:", !Ref "AWS::Region", ":", !Ref "AWS::AccountId",":", "table/", !Ref DynamoDBTable]]
+        -
+          PolicyName: SnsPublish
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: Allow
+                Action: sns:Publish
+                Resource: !Ref NotificationTopicArn
+              -
+                Effect: Allow
+                Action: sns:ListSubscriptionsByTopic
+                Resource: "*"
+              -
+                Effect: Allow
+                Action: iam:ListAccountAliases
+                Resource: "*"
+
+  # --- Group 1 Lambda Trigger ------------------------------------------------
+  ScheduledRuleGroup1:
+    Type: AWS::Events::Rule
+    Condition: CreateResources
+    Properties:
+      Name: SpotPriceRetrievalGroup1
+      Description: rule trigger for Lambda daily spot price retriever function (Time = GMT)
+      State: ENABLED
+      ScheduleExpression: cron(05 01 * * ? *)
+      Targets:
+      - Arn:
+          Ref: ProductionAlias
+        Id: Production
+        Input:
+          Fn::Join:
+          - ''
+          - - '{"account":"'
+            - !Ref "AWS::AccountId"
+            - '","region":"'
+            - !Ref AWS::Region
+            - '",'
+            - '"detail": {'
+            - '"eventName": "Group1Regions'
+            - '","userIdentity": {"arn": "NA", "principalId": "events.'
+            - !Ref AWS::Region
+            - '.amazonaws.com", "type": "scheduled-event"}'
+            - ',"responseElements": "ap-northeast-1,ap-northeast-2,ap-northeast-3,sa-east-1"'
+            - '}}'
+
+  PermissionForEventsToInvokeLambdaGroup1:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName:
+        Ref: ProductionAlias
+      Principal: events.amazonaws.com
+      SourceArn:
+        Fn::GetAtt:
+        - ScheduledRuleGroup1
+        - Arn
+
+
+  # -- Alias and Version ------------------------------------------------------
+  ProductionAlias:
+    Type: AWS::Lambda::Alias
+    Properties:
+      FunctionName:
+        Ref: FunctionSpotPriceDataRetrieval_Group1
+      FunctionVersion:
+        Fn::GetAtt:
+        - StableVersion
+        - Version
+      Name: PROD
+
+  StableVersion:
+    Type: AWS::Lambda::Version
+    Properties:
+      Description: Stable version
+      FunctionName:
+        Ref: FunctionSpotPriceDataRetrieval
+
+
+#-------------------------------------------------------------------------------
+#   OUTPUTS
+#-------------------------------------------------------------------------------
+Outputs:
+  AccountIdentifier:
+      Description: Installed AWS Account Number
+      Value: !Ref "AWS::AccountId"
+  ReportsBucket:
+      Description: Reports will output to this S3 Bucket
+      Value: !Sub
+        - s3-${RegionCode}-mpc-reports-${env}
+        - { RegionCode: !Ref "AWS::Region", env: !Ref Environment}
+  CodeEnvironment:
+      Description: Code environment deployed
+      Value: !Ref Environment
+  CodeSource:
+      Description: Code Source used by CloudFormation
+      Value: !Sub
+        - s3-${RegionCode}-mpc-install-${env}/Code/cis-account-profile/profile-codebase-__MPCBUILDVERSION__.zip
+        - { RegionCode: !Ref "AWS::Region", env: !Ref Environment}
+  LambdaGroup1FunctionArn:
+      Description: Lambda Spot Price Data Retriever function ARN
+      Value:
+        Fn::GetAtt:
+          - FunctionSpotPriceDataRetrieval
+          - Arn
