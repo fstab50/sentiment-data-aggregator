@@ -1,2 +1,2 @@
-# lambda-spotprices
+# lambda-sentiment-data
 AWS Lambda function which retrieves EC2 Spot Prices and stores in Amazon S3
